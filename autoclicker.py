@@ -1,45 +1,52 @@
-import keyboard
-import pyautogui
-import time
 import threading
+import time
+import pyautogui
 
 class AutoClicker:
     def __init__(self):
         self.running = False
         self.thread = None
 
-    def start(self, hours, minutes, seconds, milliseconds, button="left", x=None, y=None):
-        interval = (hours * 3600 + minutes * 60 + seconds) + (milliseconds / 1000)
-        if interval <= 0:
+    def start(self, interval_seconds: float, mouse_button: str = "left",
+              click_type: str = "single", repeat: int | None = None,
+              x: int | None = None, y: int | None = None):
+        if self.running:
+            return
+        if interval_seconds <= 0:
             return
         self.running = True
-        self.thread = threading.Thread(target=self._click_loop, args=(interval, button, x, y), daemon=True)
+        self.thread = threading.Thread(
+            target=self._loop,
+            args=(interval_seconds, mouse_button, click_type, repeat, x, y),
+            daemon=True
+        )
         self.thread.start()
-        # Hotkey stop (F6)
-        keyboard.add_hotkey("f6", self.stop)
 
-    def _perform_click(self, button, x, y):
-        if button == "double":
-            if x is not None and y is not None:
-                pyautogui.doubleClick(x=x, y=y)
-            else:
-                pyautogui.doubleClick()
+    def _do_click(self, mouse_button, click_type, x, y):
+        # click_type: single|double
+        kwargs = {}
+        if x is not None and y is not None:
+            kwargs["x"] = x
+            kwargs["y"] = y
+        if click_type == "double":
+            pyautogui.doubleClick(button=mouse_button, **kwargs)
         else:
-            if x is not None and y is not None:
-                pyautogui.click(x=x, y=y, button=button)
-            else:
-                pyautogui.click(button=button)
+            pyautogui.click(button=mouse_button, **kwargs)
 
-    def _click_loop(self, interval, button, x, y):
+    def _loop(self, interval, mouse_button, click_type, repeat, x, y):
+        count = 0
         while self.running:
-            self._perform_click(button, x, y)
+            self._do_click(mouse_button, click_type, x, y)
+            count += 1
+            if repeat is not None and count >= repeat:
+                break
             time.sleep(interval)
+        self.running = False
 
     def stop(self):
         self.running = False
         if self.thread and self.thread.is_alive():
-            # Jangan join bila dipanggil dari hotkey thread lain yang bisa blok
             try:
-                self.thread.join(timeout=0.2)
+                self.thread.join(timeout=0.3)
             except RuntimeError:
                 pass
