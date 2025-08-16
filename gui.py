@@ -36,6 +36,13 @@ class AutoClickerGUI:
         self._init_style()
         self._build_ui()
         self._bind_hotkey()
+        self._ensure_interval_defaults()
+        
+        # pick overlay
+        self.pick_overlay = None
+        self.pick_canvas = None
+        self._pick_cross_lines = ()
+        self._pick_coord_label = None
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(40, self._center)
@@ -119,10 +126,12 @@ class AutoClickerGUI:
         frm_cursor.columnconfigure(9, weight=1)
         ttk.Radiobutton(frm_cursor, text="Current location", value="current",
                         variable=self.click_mode).grid(row=0, column=0, columnspan=3, sticky="w")
+        # Geser bullet radio kedua lebih jauh dari teks "Current location"
         ttk.Radiobutton(frm_cursor, text="", value="fixed",
-                        variable=self.click_mode).grid(row=0, column=3, sticky="w")
+                        variable=self.click_mode).grid(row=0, column=3, sticky="w", padx=(30,4))
         self.pick_btn = ttk.Button(frm_cursor, text="Pick location", style="Flat.TButton",
                                    command=self.begin_pick)
+        # Sesuaikan kembali spacing tombol (lebih dekat ke bullet, tapi tetap ada jarak)
         self.pick_btn.grid(row=0, column=4, padx=(4,12))
         ttk.Label(frm_cursor, text="X").grid(row=0, column=5, sticky="e")
         self.x_entry = ttk.Entry(frm_cursor, width=7)
@@ -165,6 +174,9 @@ class AutoClickerGUI:
         var = tk.IntVar(value=default)
         sp = ttk.Spinbox(parent, from_=from_, to=to, width=width, textvariable=var)
         sp.grid(row=row, column=col_start+1, padx=(0,10))
+        # Paksa teks tampil (kadang Spinbox muncul kosong di beberapa sistem)
+        sp.delete(0, tk.END)
+        sp.insert(0, str(default))
 
         def _normalize(_e):
             if sp.get().strip() == "":
@@ -172,6 +184,26 @@ class AutoClickerGUI:
                 sp.insert(0, "0")
         sp.bind("<FocusOut>", _normalize)
         return sp
+    
+    def _ensure_interval_defaults(self):
+        """Pastikan kolom interval tidak kosong & set default awal 1 detik."""
+        defaults = [
+            (self.hours, "0"),
+            (self.mins, "0"),
+            (self.secs, "1"),   # default 1 detik
+            (self.millis, "0"),
+        ]
+        for widget, val in defaults:
+            if widget.get().strip() == "":
+                widget.delete(0, tk.END)
+                widget.insert(0, val)
+        # Jika semua 0 (misal user ubah sebelum start), tetap jaga secs=1 untuk default awal
+        if (self.hours.get().strip() in ("","0") and
+            self.mins.get().strip() in ("","0") and
+            self.secs.get().strip() in ("","0") and
+            self.millis.get().strip() in ("","0")):
+            self.secs.delete(0, tk.END)
+            self.secs.insert(0, "1")
 
     def _interval_seconds(self):
         def _val(widget):
@@ -212,48 +244,63 @@ class AutoClickerGUI:
         win.title("Set Hotkey")
         win.transient(self.root)
         win.resizable(False, False)
-        msg = ("Press a key (you may hold Ctrl/Alt/Shift first).\n"
-               "Only modifier = belum disimpan.\n"
-               "BackSpace = clear, Esc = cancel.")
-        ttk.Label(win, text=msg, foreground=TEXT_MUTED, justify="left").pack(padx=14, pady=(12,6))
+        win.configure(bg=BG)
+
+        # Konten
+        msg = ("Press desired hotkey (you may hold Ctrl / Alt / Shift then press a key).\n"
+               "Only modifiers will not be saved.\n"
+               "Enter = confirm current combo, BackSpace = clear, Esc = cancel.")
+        pad = 14
+        ttk.Label(win, text=msg, foreground=TEXT_MUTED, justify="left").pack(padx=pad, pady=(12,6))
         current = tk.StringVar(value=f"Current: {self.hotkey.upper()}")
         preview = tk.StringVar(value="New: (waiting)")
         ttk.Label(win, textvariable=current).pack(pady=(0,2))
-        ttk.Label(win, textvariable=preview, font=("Segoe UI",9,"bold")).pack(pady=(0,10))
+        lbl_preview = ttk.Label(win, textvariable=preview, font=("Segoe UI",10,"bold"))
+        lbl_preview.pack(pady=(0,10))
+
+        # Tombol optional (Cancel) agar user nyaman (Enter tetap bisa)
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(pady=(0,10))
+        def cancel():
+            win.destroy()
+        cancel_btn = ttk.Button(btn_frame, text="Cancel", command=cancel, style="Flat.TButton")
+        cancel_btn.grid(row=0, column=0, padx=4)
+
+        win.update_idletasks()
+
+        # Center dialog di tengah layar
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        w, h = win.winfo_width(), win.winfo_height()
+        x = (sw - w) // 2
+        y = (sh - h) // 3
+        win.geometry(f"{w}x{h}+{x}+{y}")
+
+        # Fokus langsung & topmost sementara supaya tidak perlu klik
+        win.attributes("-topmost", True)
+        win.focus_force()
+        win.lift()
+        win.after(150, lambda: win.attributes("-topmost", False))  # lepaskan supaya tidak mengganggu
+
         win.grab_set()
 
         pressed_mods: set[str] = set()
+        chosen_combo: list[str] = []
+
         MOD_MAP = {
-            "control_l":"ctrl","control_r":"ctrl",
-            "shift_l":"shift","shift_r":"shift",
-            "alt_l":"alt","alt_r":"alt"
+            "control_l":"ctrl","control_r":"ctrl","control":"ctrl",
+            "shift_l":"shift","shift_r":"shift","shift":"shift",
+            "alt_l":"alt","alt_r":"alt","alt":"alt"
         }
 
-        def format_combo(mods, key):
+        def format_combo(mods, key=None):
             parts = sorted(mods)
             if key:
                 parts.append(key)
             return "+".join(parts)
 
-        def on_key_press(e):
-            ks = e.keysym.lower()
-            if ks == "escape":
-                win.destroy(); return
-            if ks == "backspace":
-                pressed_mods.clear()
-                preview.set("New: (waiting)")
+        def apply_combo(combo: str):
+            if not combo:
                 return
-            if ks in MOD_MAP:
-                pressed_mods.add(MOD_MAP[ks])
-                preview.set("New: " + format_combo(pressed_mods, None))
-                return
-            # ignore pure Shift, Control, Alt reported generically
-            if ks in ("shift","control","alt"):
-                return
-            combo = format_combo(pressed_mods, ks)
-            if combo == "":
-                return
-            # apply
             self.hotkey = combo
             self._bind_hotkey()
             self.start_btn.configure(text=f"Start ({self.hotkey.upper()})")
@@ -261,31 +308,214 @@ class AutoClickerGUI:
             self.status_var.set(f"Hotkey set to {self.hotkey.upper()}")
             win.destroy()
 
-        win.bind("<KeyPress>", on_key_press)
+        def on_key_press(e):
+            ks = e.keysym.lower()
 
-    # ---------- Pick ----------
+            # Batalkan
+            if ks == "escape":
+                win.destroy()
+                return
+
+            # Clear
+            if ks == "backspace":
+                pressed_mods.clear()
+                chosen_combo.clear()
+                preview.set("New: (waiting)")
+                return
+
+            # Enter untuk konfirmasi jika sudah ada combo
+            if ks == "return":
+                if chosen_combo:
+                    apply_combo(chosen_combo[0])
+                return
+
+            # Modifiers
+            if ks in MOD_MAP:
+                pressed_mods.add(MOD_MAP[ks])
+                preview.set("New: " + format_combo(pressed_mods))
+                return
+
+            # Abaikan jika hanya key repetisi sama
+            if chosen_combo and chosen_combo[0].endswith(f"+{ks}"):
+                return
+
+            # Normal key
+            if ks in ("shift","control","alt"):
+                return
+
+            combo = format_combo(pressed_mods, ks)
+            if not combo:
+                return
+            preview.set("New: " + combo.upper())
+            chosen_combo[:] = [combo]  # simpan
+            # Auto-apply setelah sedikit delay (feel natural)
+            win.after(180, lambda: apply_combo(combo))
+
+        def on_key_release(_e):
+            # Tidak menghapus modifier agar user bisa membentuk combo
+            pass
+
+        win.bind("<KeyPress>", on_key_press)
+        win.bind("<KeyRelease>", on_key_release)
+
+    # ---------- Pick (Overlay Crosshair) ----------
     def begin_pick(self):
-        if self.pick_in_progress:
+        if self.pick_in_progress or self.auto.running:
             return
         self.pick_in_progress = True
-        self.status_var.set("Pick mode: click target...")
-        self.root.withdraw()
-        self.mouse_listener = mouse.Listener(on_click=self._on_pick_click)
-        self.mouse_listener.start()
+        self.status_var.set("Pick mode: arahkan & klik untuk memilih (Esc batal).")
+        self._show_pick_overlay()
 
-    def _on_pick_click(self, x, y, button, pressed):
-        from pynput.mouse import Button
-        if pressed and button == Button.left:
-            self.x_entry.delete(0, tk.END); self.y_entry.delete(0, tk.END)
-            self.x_entry.insert(0, str(x)); self.y_entry.insert(0,str(y))
-            self.click_mode.set("fixed")
-            self.status_var.set(f"Picked ({x},{y}).")
-            self.pick_in_progress = False
-            if self.mouse_listener:
-                try: self.mouse_listener.stop()
-                except: pass
-            self.root.deiconify()
-            self.root.after(60, self.root.lift)
+    def _show_pick_overlay(self):
+        # Dapatkan virtual screen mencakup semua monitor
+        vx, vy, vw, vh = self._get_virtual_screen()
+        self._virtual_origin = (vx, vy)  # simpan untuk konversi koordinat
+
+        ov = tk.Toplevel(self.root)
+        self.pick_overlay = ov
+        ov.withdraw()
+        ov.overrideredirect(True)
+        ov.attributes("-topmost", True)
+
+        # Set geometry ke seluruh virtual screen (boleh koordinat negatif)
+        ov.geometry(f"{vw}x{vh}+{vx}+{vy}")
+
+        # Transparansi
+        try:
+            ov.attributes("-alpha", 0.35)
+            alpha_mode = True
+        except:
+            alpha_mode = False
+
+        # Canvas full area
+        cv = tk.Canvas(ov, width=vw, height=vh, highlightthickness=0, bd=0,
+                       bg="black")
+        cv.pack(fill="both", expand=True)
+        if not alpha_mode:
+            cv.create_rectangle(0,0,vw,vh, fill="black", stipple="gray50", outline="")
+        self.pick_canvas = cv
+
+        # Posisi kursor sekarang (global) untuk starting focus
+        try:
+            import pyautogui
+            mx, my = pyautogui.position()
+        except:
+            # fallback tengah virtual screen
+            mx, my = vx + vw//2, vy + vh//2
+        # Koordinat relatif canvas
+        rx = mx - vx
+        ry = my - vy
+
+        radius = 60
+        focus = cv.create_oval(rx-radius, ry-radius, rx+radius, ry+radius,
+                               outline="#FFFFFF", width=2, fill="" if alpha_mode else "")
+        h_line = cv.create_line(0, ry, vw, ry, fill="#FFFFFF", width=1)
+        v_line = cv.create_line(rx, 0, rx, vh, fill="#FFFFFF", width=1)
+        self._pick_cross_lines = (h_line, v_line, focus)
+
+        self._pick_coord_label = cv.create_text(rx+radius+10, ry-10,
+                                                text=f"({mx},{my})",
+                                                anchor="w",
+                                                fill="#FFFFFF",
+                                                font=("Segoe UI", 10, "bold"))
+
+        # Bind
+        cv.bind("<Motion>", self._on_pick_motion)
+        cv.bind("<Button-1>", self._on_pick_click)
+        cv.bind("<Button-3>", self._on_pick_cancel)
+        ov.bind("<Escape>", lambda _e: self._end_pick(cancel=True))
+
+        # Disable root sementara
+        try:
+            self.root.attributes("-disabled", True)
+        except:
+            pass
+        ov.deiconify()
+        ov.focus_force()
+        ov.lift()
+        ov.deiconify()
+        ov.focus_force()
+        ov.lift()
+        try:
+            ov.config(cursor="crosshair")  # kursor bidik
+        except:
+            pass
+
+    def _get_virtual_screen(self):
+        """Return (vx, vy, vw, vh) virtual screen mencakup semua monitor.
+        Fallback ke screen utama jika tidak tersedia."""
+        try:
+            from ctypes import windll
+            user32 = windll.user32
+            vx = user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
+            vy = user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
+            vw = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+            vh = user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
+            # Validasi
+            if vw <= 0 or vh <= 0:
+                raise ValueError
+            return vx, vy, vw, vh
+        except:
+            # Fallback single monitor
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            return 0, 0, sw, sh
+
+    def _on_pick_motion(self, e):
+        if not self.pick_canvas:
+            return
+        cv = self.pick_canvas
+        vx, vy = getattr(self, "_virtual_origin", (0,0))
+        # e.x / e.y sudah relatif canvas; global = relatif + origin
+        rx, ry = e.x, e.y
+        gx, gy = rx + vx, ry + vy
+        vw = cv.winfo_width()
+        vh = cv.winfo_height()
+        h_line, v_line, focus = self._pick_cross_lines
+        cv.coords(h_line, 0, ry, vw, ry)
+        cv.coords(v_line, rx, 0, rx, vh)
+        r = 60
+        cv.coords(focus, rx-r, ry-r, rx+r, ry+r)
+        cv.coords(self._pick_coord_label, rx + r + 10, ry - 10)
+        cv.itemconfigure(self._pick_coord_label, text=f"({gx},{gy})")
+
+    def _on_pick_click(self, e):
+        # Simpan koordinat global (lintas monitor)
+        vx, vy = getattr(self, "_virtual_origin", (0,0))
+        gx = e.x + vx
+        gy = e.y + vy
+        self.x_entry.delete(0, tk.END)
+        self.y_entry.delete(0, tk.END)
+        self.x_entry.insert(0, str(gx))
+        self.y_entry.insert(0, str(gy))
+        self.click_mode.set("fixed")
+        self.status_var.set(f"Picked ({gx},{gy}).")
+        self._end_pick(cancel=False)
+
+    # Tambahan: handler batal & cleanup overlay
+    def _on_pick_cancel(self, _e=None):
+        self.status_var.set("Pick cancelled.")
+        self._end_pick(cancel=True)
+
+    def _end_pick(self, cancel: bool):
+        if not self.pick_in_progress:
+            return
+        self.pick_in_progress = False
+        # Hapus overlay
+        if self.pick_overlay:
+            try:
+                self.pick_overlay.destroy()
+            except:
+                pass
+            self.pick_overlay = None
+            self.pick_canvas = None
+        # Re-enable root
+        try:
+            self.root.attributes("-disabled", False)
+        except:
+            pass
+        self.root.deiconify()
+        self.root.after(30, self.root.lift)
 
     # ---------- Start / Stop ----------
     def toggle_start(self):
@@ -295,6 +525,7 @@ class AutoClickerGUI:
             self._start()
 
     def _start(self):
+        self._ensure_interval_defaults()  # cek lagi sebelum start
         try:
             interval = self._interval_seconds()
         except ValueError:
